@@ -1,0 +1,141 @@
+#!/bin/bash
+
+# =====================================================================
+# Advanced Nginx Log Analyser
+# Description: Production-grade Bash tool to parse, clean, and extract 
+#              telemetry metrics from Nginx access logs. Supports 
+#              plain text, gzipped files, stdin, and JSON output.
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# DEFAULT CONFIGURATION & VARIABLES
+# ---------------------------------------------------------------------
+OUTPUT_FORMAT="text"
+TARGET_FILE=""
+
+# ---------------------------------------------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------------------------------------------
+
+display_usage() {
+    echo "Nginx Log Analyser - Production Telemetry Tool"
+    echo "Usage: $0 [options] <logfile | ->"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help    Display this help menu and exit."
+    echo "  --json        Output the metrics in structured JSON format."
+    echo ""
+    echo "Arguments:"
+    echo "  logfile       Path to a standard plain text (.log) or compressed (.gz) Nginx log."
+    echo "  -             Read raw log streaming data directly from standard input (stdin)."
+    exit 0
+}
+
+# Safely parse metrics into JSON array format using awk
+format_to_json_array() {
+    # Expects input format: "count value"
+    awk '
+    BEGIN { printf "[" }
+    {
+        if (NR > 1) printf ", "
+        # Strip leading space, isolate count and string value
+        count = $1
+        $1 = ""
+        sub(/^ /, "", $0)
+        # Escape double quotes for valid JSON
+        gsub(/"/, "\\\"", $0)
+        printf "{\"count\": %d, \"value\": \"%s\"}", count, $0
+    }
+    END { printf "]" }
+    '
+}
+
+# ---------------------------------------------------------------------
+# ARGUMENT PARSING
+# ---------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            display_usage
+            ;;
+        --json)
+            OUTPUT_FORMAT="json"
+            shift
+            ;;
+        *)
+            TARGET_FILE="$1"
+            shift
+            ;;
+    esac
+done
+
+# Validate that an input target was actually designated
+if [ -z "$TARGET_FILE" ]; then
+    echo "Error: Missing target execution argument. Use -h for help." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------
+# STREAM INPUT EVALUATION
+# ---------------------------------------------------------------------
+if [ "$TARGET_FILE" = "-" ]; then
+    INPUT_STREAM="cat /dev/stdin"
+elif [[ "$TARGET_FILE" =~ \.gz$ ]]; then
+    if ! command -v zcat &> /dev/null; then
+        echo "Error: Compressed file detected but 'zcat' utility is missing." >&2
+        exit 1
+    fi
+    INPUT_STREAM="zcat $TARGET_FILE"
+else
+    if [ ! -f "$TARGET_FILE" ]; then
+        echo "Error: Specified log file '$TARGET_FILE' does not exist." >&2
+        exit 1
+    fi
+    INPUT_STREAM="cat $TARGET_FILE"
+fi
+
+# ---------------------------------------------------------------------
+# PIPELINE EXECUTION & REPORT GENERATION
+# ---------------------------------------------------------------------
+
+if [ "$OUTPUT_FORMAT" = "json" ]; then
+    # Generate strict machine-readable JSON structure
+    cat <<EOF
+{
+  "top_remote_ips": $(eval "$INPUT_STREAM" | awk '{print $1}' | sort | uniq -c | sort -rn | head -n 5 | format_to_json_array),
+  "top_requested_endpoints": $(eval "$INPUT_STREAM" | awk '{print $7}' | sort | uniq -c | sort -rn | head -n 5 | format_to_json_array),
+  "top_http_response_codes": $(eval "$INPUT_STREAM" | awk '{print $9}' | sort | uniq -c | sort -rn | head -n 5 | format_to_json_array),
+  "top_user_agents": $(eval "$INPUT_STREAM" | awk -F'"' '{print $6}' | awk 'NF && !/^-$/' | sort | uniq -c | sort -rn | head -n 5 | format_to_json_array)
+}
+EOF
+
+else
+    # Generate clean human-readable text report
+    echo "=================================================="
+    echo "          NGINX LOG ANALYSIS REPORT               "
+    echo "=================================================="
+    echo ""
+
+    echo "--- [1] TOP 5 REMOTE IP ADDRESSES ---"
+    eval "$INPUT_STREAM" | awk '{print $1}' | sort | uniq -c | sort -rn | head -n 5
+    echo ""
+
+    echo "--- [2] TOP 5 MOST REQUESTED ENDPOINTS (URLs) ---"
+    eval "$INPUT_STREAM" | awk '{print $7}' | sort | uniq -c | sort -rn | head -n 5
+    echo ""
+
+    echo "--- [3] TOP 5 HTTP RESPONSE CODES ---"
+    eval "$INPUT_STREAM" | awk '{print $9}' | sort | uniq -c | sort -rn | head -n 5
+    echo ""
+
+    echo "--- [4] TOP 5 USER AGENTS ---"
+    # Added resilience: Filters out empty inputs or literal dashes before sorting
+    eval "$INPUT_STREAM" | awk -F'"' '{print $6}' | awk 'NF && !/^-$/' | sort | uniq -c | sort -rn | head -n 5
+    echo ""
+
+    echo "=================================================="
+    echo "             END OF GENERATED REPORT              "
+    echo "=================================================="
+fi
+
+exit 0
